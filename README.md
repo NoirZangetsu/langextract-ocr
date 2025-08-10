@@ -412,3 +412,96 @@ For health-related applications, use of LangExtract is also subject to the
 ---
 
 **Happy Extracting!**
+
+## Ingest (PDF/IMG) with OCR/VLM
+
+LangExtract çekirdek API’sini değiştirmeden PDF/IMG belgelerini metne dönüştürmek için isteğe bağlı bir "ingestion" katmanı sağlanır. Bu katman farklı OCR ve VLM/HTR motorlarını tek tip bir arayüzde sunar ve metni üretip `lx.extract(...)` akışına verir.
+
+### Kurulum
+
+Temel ingest bağımlılıkları ve motorlar extras ile ayrıştırılmıştır:
+
+```bash
+# Temel bileşenler (PDF vektör metni, rasterizasyon, Pillow, vb.)
+pip install -e ".[ingest]"
+
+# OCR motorları
+pip install -e ".[ingest-paddle]"     # PaddleOCR (PP-OCRv4, çok dilli)
+pip install -e ".[ingest-easyocr]"     # EasyOCR
+pip install -e ".[ingest-tesseract]"   # pytesseract (Tesseract 5.x sistem paketi gerekir)
+pip install -e ".[ingest-doctr]"       # DocTR (Transformer tabanlı)
+
+# VLM/HTR (GPU önerilir)
+pip install -e ".[ingest-vlm]"         # transformers+torch+timm (TrOCR/Donut/Nougat)
+```
+
+Notlar:
+- Tesseract için sistem kurulumuna ihtiyaç vardır (macOS: `brew install tesseract`, Linux: dağıtıma göre paket).
+- GPU kullanımı hız/kalite için önerilir; GPU yoksa Torch CPU ile çalışır.
+
+### Komut Satırı: `langextract-ingest`
+
+CLI iki alt komut sunar: `pdf` ve `image`.
+
+```bash
+# PDF → (vektör metin varsa onu, yoksa OCR/VLM) → LangExtract
+langextract-ingest pdf input.pdf \
+  --engine auto \
+  --ocr-lang turkish \
+  --confidence-threshold 0.6 \
+  --prompt prompt.txt \
+  --few-shots-json examples.json \
+  --model-id gemini-2.5-flash \
+  --output out.json
+
+# Görüntü(ler) → OCR/VLM → LangExtract
+langextract-ingest image /path/to/image_or_dir \
+  --engine paddle \
+  --ocr-lang turkish \
+  --prompt prompt.txt \
+  --few-shots-json examples.json \
+  --output out.json
+```
+
+Başlıca argümanlar:
+- `--engine`: `paddle|tesseract|easyocr|doctr|trocr|donut|nougat|auto`
+- `--enable-htr`: El yazısı için TrOCR yolunu etkinleştirir (gelişmiş kullanımda)
+- `--ocr-lang`: Motorun desteklediği dil anahtarı (ör. `turkish`, `tr`, `multilingual`)
+- `--prefer-ocr`: PDF vektör metnini atlayıp doğrudan OCR yapar
+- `--dpi`, `--first-page`, `--last-page`: PDF rasterizasyon ayarları
+- `--confidence-threshold`: Motor seçiminde ve fallback’te kullanılan eşik
+- `--prompt`, `--few-shots-json`: Mevcut LangExtract örnek akışı ile uyumludur
+
+Çıktı JSON alanları:
+- `input_path`, `used_ocr`, `engine`, `ocr_confidence`, `text_len`, `extraction`
+
+### Motor Seçimi ve Fallback
+- `auto` mod: İlk sayfanın hızlı bir kırpımı üzerinde 2–3 aday motoru çalıştırır (varsayılan adaylar: `paddle`, `easyocr`, `tesseract`).
+- Skor: Ortalama güven skoru + Türkçe karakter sezgisi; hız sinyali opsiyoneldir.
+- Eşik altı güven olduğunda sıradaki motora geçilir. Varsayılan sıra: `paddle → easyocr → tesseract`. El yazısı sinyali varsa `trocr` denenebilir.
+
+### PDF Akışı
+1) `pdfminer.six` ile vektör metin kontrolü; yeterliyse OCR atlanır.
+2) Değilse `pdf2image` ile rasterize edilir ve seçilen motorla OCR yapılır.
+3) Donut/Nougat seçildiyse doğrudan bu motorlarla metin üretilir (OCR-free) ve sayfa bazlı birleştirilir.
+
+### HTR ve Karma Mizanpaj
+- `--enable-htr` etkinse basit bir strateji ile baskı OCR çıktılarına ek TrOCR çalıştırılıp sonuçlar birleştirilebilir.
+- Gelişmiş bölge tespiti bu sürümde kapsam dışıdır; katkılar memnuniyetle karşılanır.
+
+### Performans ve Kaynak Kullanımı
+- GPU (CUDA/Metal destekli) ile Paddle/EasyOCR/DocTR ve özellikle TrOCR/Donut/Nougat ciddi hız/kalite artışı sağlar.
+- Bellek ve model indirme sürelerini göz önünde bulundurun; büyük VLM modelleri ilk çağrıda ağırlık indirir.
+
+### Programatik Kullanım (özet)
+
+```python
+from langextract.contrib.ingest import pipeline
+import langextract as lx
+
+# PDF tanı + extraction
+ing = pipeline.recognize_pdf("input.pdf", engine="auto", ocr_cfg={"lang": "turkish"})
+result = lx.extract(text_or_documents=ing.text, prompt_description=prompt, examples=examples)
+```
+
+Bu eklenti katmanı çekirdek API’yi değiştirmez; yalnızca metin üretimi için ön işleme sağlar.
